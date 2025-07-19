@@ -1,0 +1,816 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+    getFirestore, 
+    collection, 
+    addDoc, 
+    getDocs, 
+    updateDoc, 
+    deleteDoc, 
+    doc, 
+    query, 
+    where, 
+    onSnapshot,
+    setLogLevel
+} from 'firebase/firestore';
+import { 
+    getAuth, 
+    signInAnonymously, 
+    onAuthStateChanged, 
+    // signInWithCustomToken, // **FIX**: Removed unused import
+    signInWithEmailAndPassword,
+    signOut,
+    setPersistence,
+    browserSessionPersistence
+} from 'firebase/auth';
+
+// --- Firebase Configuration ---
+const firebaseConfig = {
+  apiKey: "AIzaSyAg1iAPR4yGc5ceCUA_5AJr1f7E5szZnfs",
+  authDomain: "gemini-ai-headshot.firebaseapp.com",
+  projectId: "gemini-ai-headshot",
+  storageBucket: "gemini-ai-headshot.firebasestorage.app",
+  messagingSenderId: "1005030516982",
+  appId: "1:1005030516982:web:9336cde2db18e01c69a4d7",
+  measurementId: "G-573ZDNDCL7"
+};
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+// --- Firebase Initialization ---
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+const auth = getAuth(app);
+setLogLevel('debug');
+
+// --- Helper Components ---
+
+const Modal = ({ isOpen, onClose, title, children }) => {
+    if (!isOpen) return null;
+    return (
+        <div className="fixed inset-0 bg-black bg-opacity-60 z-50 flex justify-center items-center p-4 transition-opacity duration-300">
+            <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-md transform transition-all duration-300 scale-95 animate-modal-in">
+                <div className="p-4 border-b dark:border-gray-700 flex justify-between items-center">
+                    <h3 className="text-xl font-semibold text-gray-800 dark:text-gray-100">{title}</h3>
+                    <button onClick={onClose} className="text-gray-500 hover:text-gray-800 dark:hover:text-gray-200 text-3xl leading-none">&times;</button>
+                </div>
+                <div className="p-6 text-gray-700 dark:text-gray-300">
+                    {children}
+                </div>
+            </div>
+            <style>{`
+                @keyframes modal-in {
+                    from { opacity: 0; transform: scale(0.9); }
+                    to { opacity: 1; transform: scale(1); }
+                }
+                .animate-modal-in { animation: modal-in 0.3s ease-out forwards; }
+            `}</style>
+        </div>
+    );
+};
+
+const Spinner = ({ forButton = true }) => (
+    <div className={`animate-spin rounded-full h-5 w-5 border-b-2 ${forButton ? 'border-white' : 'border-blue-500'}`}></div>
+);
+
+
+// --- Admin Login Component ---
+function AdminLogin({ onLogin, error, isLoading, projectId }) {
+    const [email, setEmail] = useState('');
+    const [password, setPassword] = useState('');
+
+    const handleSubmit = (e) => {
+        e.preventDefault();
+        onLogin(email, password);
+    };
+
+    return (
+        <div className="bg-white dark:bg-gray-800 p-8 rounded-xl shadow-lg w-full max-w-md mx-auto">
+            <h2 className="text-2xl font-bold text-center text-gray-800 dark:text-gray-100 mb-6">管理後台登入</h2>
+            
+            {error && (
+                <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-lg relative mb-4" role="alert">
+                    <strong className="font-bold block">登入失敗</strong>
+                    <span className="block mt-1 text-sm">{error}</span>
+                </div>
+            )}
+
+            <form onSubmit={handleSubmit} className="space-y-6">
+                <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">管理員 Email</label>
+                    <input
+                        type="email"
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        className="mt-1 block w-full border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-200 rounded-md shadow-sm p-3 focus:ring-blue-500 focus:border-blue-500"
+                        required
+                    />
+                </div>
+                <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">密碼</label>
+                    <input
+                        type="password"
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        className="mt-1 block w-full border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-200 rounded-md shadow-sm p-3 focus:ring-blue-500 focus:border-blue-500"
+                        required
+                    />
+                </div>
+                <div>
+                    <button type="submit" disabled={isLoading} className="w-full bg-blue-600 text-white font-semibold py-3 px-4 rounded-lg hover:bg-blue-700 transition flex justify-center items-center disabled:bg-blue-400">
+                        {isLoading ? <Spinner /> : '登入'}
+                    </button>
+                </div>
+            </form>
+            <div className="mt-6 text-center text-xs text-gray-500 dark:text-gray-400">
+                <p>Firebase 專案 ID: <strong className="font-mono break-all">{projectId}</strong></p>
+            </div>
+        </div>
+    );
+}
+
+
+// --- Main Components ---
+
+function AdminPanel({ onLogout, user }) {
+    const [trainers, setTrainers] = useState([]);
+    const [isModalOpen, setIsModalOpen] = useState(false);
+    const [editingTrainer, setEditingTrainer] = useState(null);
+    const [formData, setFormData] = useState({ id: '', name: '', email: '' });
+    const [isLoading, setIsLoading] = useState(false);
+    const [error, setError] = useState('');
+    const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+    const [trainerToDelete, setTrainerToDelete] = useState(null);
+    
+    const trainersCollectionRef = collection(db, `artifacts/${appId}/public/data/trainers`);
+
+    useEffect(() => {
+        if (!user) return; 
+
+        setIsLoading(true);
+        const unsubscribe = onSnapshot(trainersCollectionRef, (snapshot) => {
+            const trainersData = snapshot.docs.map(d => ({ firestoreDocId: d.id, ...d.data() }));
+            setTrainers(trainersData);
+            setIsLoading(false);
+        }, (err) => {
+            console.error("讀取講師資料時發生錯誤: ", err);
+            setError("無法讀取講師資料。請確認您的 Firestore 安全性規則是否允許讀取。");
+            setIsLoading(false);
+        });
+
+        return () => unsubscribe();
+    }, [user]);
+
+    const handleInputChange = (e) => {
+        const { name, value } = e.target;
+        setFormData(prev => ({ ...prev, [name]: value }));
+    };
+
+    const handleOpenModal = (trainer = null) => {
+        if (trainer) {
+            setEditingTrainer(trainer);
+            setFormData({ id: trainer.id, name: trainer.name, email: trainer.email });
+        } else {
+            setEditingTrainer(null);
+            setFormData({ id: '', name: '', email: '' });
+        }
+        setError('');
+        setIsModalOpen(true);
+    };
+
+    const handleCloseModal = () => {
+        setIsModalOpen(false);
+    };
+
+    const handleSubmit = async (e) => {
+        e.preventDefault();
+        if (!formData.id || !formData.name || !formData.email) {
+            setError("所有欄位皆為必填。");
+            return;
+        }
+        setIsLoading(true);
+        setError('');
+
+        try {
+            if (editingTrainer) {
+                const trainerDoc = doc(db, `artifacts/${appId}/public/data/trainers`, editingTrainer.firestoreDocId);
+                await updateDoc(trainerDoc, formData);
+            } else {
+                const q = query(trainersCollectionRef, where("id", "==", formData.id));
+                const querySnapshot = await getDocs(q);
+                if (!querySnapshot.empty) {
+                    setError("此講師編號已存在。");
+                    setIsLoading(false);
+                    return;
+                }
+                await addDoc(trainersCollectionRef, formData);
+            }
+            setIsLoading(false);
+            handleCloseModal();
+        } catch (err) {
+            console.error("儲存講師資料時發生錯誤: ", err);
+            let userFriendlyError = "儲存失敗，請檢查網路連線或稍後再試。";
+            if (err.code === 'permission-denied') {
+                userFriendlyError = "權限不足，無法儲存。請確認您的 Firestore 安全性規則已設定為允許已驗證的使用者寫入 'public/data' 集合。";
+            }
+            setError(`${userFriendlyError} (錯誤碼: ${err.code})`);
+            setIsLoading(false);
+        }
+    };
+
+    const handleDeleteClick = (trainer) => {
+        setTrainerToDelete(trainer);
+        setIsDeleteModalOpen(true);
+    };
+
+    const handleConfirmDelete = async () => {
+        if (!trainerToDelete) return;
+        try {
+            const trainerDoc = doc(db, `artifacts/${appId}/public/data/trainers`, trainerToDelete.firestoreDocId);
+            await deleteDoc(trainerDoc);
+        } catch (err) {
+            console.error("刪除講師時發生錯誤: ", err);
+            setError("刪除失敗，請稍後再試。");
+        } finally {
+            setIsDeleteModalOpen(false);
+            setTrainerToDelete(null);
+        }
+    };
+
+    return (
+        <div className="bg-white dark:bg-gray-800 p-8 rounded-xl shadow-lg w-full">
+            <div className="flex justify-between items-center mb-6">
+                 <h2 className="text-2xl font-bold text-gray-800 dark:text-gray-100">講師管理後台</h2>
+                 <button onClick={onLogout} className="bg-red-500 text-white font-semibold py-2 px-4 rounded-lg hover:bg-red-600 transition">登出</button>
+            </div>
+            <p className="mb-4 text-gray-600 dark:text-gray-300">已登入為: {user.email}</p>
+            <button onClick={() => handleOpenModal()} className="mb-6 bg-blue-600 text-white font-semibold py-2 px-4 rounded-lg hover:bg-blue-700 transition">
+                新增講師
+            </button>
+            {error && <p className="text-red-500 bg-red-100 p-3 rounded-lg mb-4">{error}</p>}
+            <div className="overflow-x-auto">
+                <table className="w-full text-left text-gray-800 dark:text-gray-200">
+                    <thead className="bg-gray-100 dark:bg-gray-700">
+                        <tr>
+                            <th className="p-3">講師限定編號</th>
+                            <th className="p-3">姓名</th>
+                            <th className="p-3">電子郵件</th>
+                            <th className="p-3">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {isLoading ? (
+                            <tr><td colSpan="4" className="p-4 text-center text-gray-500">載入中...</td></tr>
+                        ) : (
+                            trainers.map(trainer => (
+                                <tr key={trainer.firestoreDocId} className="border-b dark:border-gray-700">
+                                    <td className="p-3">{trainer.id}</td>
+                                    <td className="p-3">{trainer.name}</td>
+                                    <td className="p-3">{trainer.email}</td>
+                                    <td className="p-3 flex space-x-2">
+                                        <button onClick={() => handleOpenModal(trainer)} className="text-blue-600 hover:underline">編輯</button>
+                                        <button onClick={() => handleDeleteClick(trainer)} className="text-red-600 hover:underline">刪除</button>
+                                    </td>
+                                </tr>
+                            ))
+                        )}
+                    </tbody>
+                </table>
+            </div>
+
+            <Modal isOpen={isModalOpen} onClose={handleCloseModal} title={editingTrainer ? "編輯講師" : "新增講師"}>
+                <form onSubmit={handleSubmit}>
+                    <div className="space-y-4">
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">講師限定編號</label>
+                            <input type="text" name="id" value={formData.id} onChange={handleInputChange} className="mt-1 block w-full border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 rounded-md shadow-sm p-2" required disabled={!!editingTrainer}/>
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">姓名</label>
+                            <input type="text" name="name" value={formData.name} onChange={handleInputChange} className="mt-1 block w-full border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 rounded-md shadow-sm p-2" required />
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">電子郵件</label>
+                            <input type="email" name="email" value={formData.email} onChange={handleInputChange} className="mt-1 block w-full border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 rounded-md shadow-sm p-2" required />
+                        </div>
+                    </div>
+                    {error && <p className="text-red-500 mt-4">{error}</p>}
+                    <div className="mt-6 flex justify-end space-x-3">
+                        <button type="button" onClick={handleCloseModal} className="bg-gray-200 text-gray-700 font-semibold py-2 px-4 rounded-lg hover:bg-gray-300 dark:bg-gray-600 dark:text-gray-200 dark:hover:bg-gray-500">取消</button>
+                        <button type="submit" disabled={isLoading} className="bg-blue-600 text-white font-semibold py-2 px-4 rounded-lg hover:bg-blue-700 flex items-center disabled:bg-blue-400">
+                            {isLoading ? <Spinner forButton={true} /> : (editingTrainer ? "儲存變更" : "新增")}
+                        </button>
+                    </div>
+                </form>
+            </Modal>
+            
+            <Modal isOpen={isDeleteModalOpen} onClose={() => setIsDeleteModalOpen(false)} title="確認刪除">
+                <div>
+                    <p>您確定要刪除講師 <strong className="font-semibold">{trainerToDelete?.name}</strong> 嗎？</p>
+                    <p className="text-sm text-red-600 mt-2">此操作無法復原。</p>
+                </div>
+                <div className="mt-6 flex justify-end space-x-3">
+                    <button type="button" onClick={() => setIsDeleteModalOpen(false)} className="bg-gray-200 text-gray-700 font-semibold py-2 px-4 rounded-lg hover:bg-gray-300 dark:bg-gray-600 dark:text-gray-200 dark:hover:bg-gray-500">取消</button>
+                    <button type="button" onClick={handleConfirmDelete} className="bg-red-600 text-white font-semibold py-2 px-4 rounded-lg hover:bg-red-700">
+                        確認刪除
+                    </button>
+                </div>
+            </Modal>
+        </div>
+    );
+}
+
+
+function ProfileGenerator() {
+    const canvasRef = useRef(null);
+    const [userImage, setUserImage] = useState(null);
+    const [frameImage, setFrameImage] = useState(new Image());
+    const [currentRole, setCurrentRole] = useState('educator');
+    const [imageTransform, setImageTransform] = useState({ x: 0, y: 0, scale: 1 });
+    const [rotation, setRotation] = useState(0); 
+    const [isDragging, setIsDragging] = useState(false);
+    const [lastMousePos, setLastMousePos] = useState({ x: 0, y: 0 });
+    const [initialPinchDistance, setInitialPinchDistance] = useState(null);
+    const [message, setMessage] = useState({ text: '', type: 'info' });
+    
+    const [trainerIdInput, setTrainerIdInput] = useState('');
+    const [isTrainerVerified, setIsTrainerVerified] = useState(false);
+    const [verifiedTrainerName, setVerifiedTrainerName] = useState('');
+    const [isVerifying, setIsVerifying] = useState(false);
+    
+    const uploadButtonRef = useRef(null);
+
+    const frameUrls = {
+        trainer: "https://i.postimg.cc/Qt5vBM1M/Gemini-Trainer.png",
+        educator: "https://i.postimg.cc/fyfFKgHn/Gemini-Educator.png"
+    };
+
+    const drawContent = () => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        const padding = 28;
+        const radius = canvas.width / 2 - padding;
+
+        if (userImage) {
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(canvas.width / 2, canvas.height / 2, radius, 0, Math.PI * 2);
+            ctx.clip();
+
+            ctx.save();
+            const { x, y, scale } = imageTransform;
+            const scaledWidth = userImage.width * scale;
+            const scaledHeight = userImage.height * scale;
+
+            ctx.translate(x + scaledWidth / 2, y + scaledHeight / 2);
+            ctx.rotate(rotation * Math.PI / 180);
+            ctx.drawImage(userImage, -scaledWidth / 2, -scaledHeight / 2, scaledWidth, scaledHeight);
+            
+            ctx.restore();
+            ctx.restore();
+        } else {
+            ctx.font = '20px Inter, sans-serif';
+            ctx.fillStyle = '#aaa';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('請上傳圖片', canvas.width / 2, canvas.height / 2);
+        }
+
+        if (frameImage.complete && frameImage.naturalHeight !== 0) {
+            ctx.drawImage(frameImage, 0, 0, canvas.width, canvas.height);
+        }
+    };
+
+    useEffect(() => {
+        drawContent();
+    }, [userImage, frameImage, imageTransform, rotation]);
+
+    const updateFrame = (role) => {
+        const newFrame = new Image();
+        newFrame.crossOrigin = 'Anonymous';
+        newFrame.src = frameUrls[role];
+        newFrame.onload = () => {
+            setFrameImage(newFrame);
+        };
+    };
+    
+    useEffect(() => {
+        updateFrame(currentRole);
+    }, [currentRole]);
+
+    const handleRoleChange = (role) => {
+        setCurrentRole(role);
+        setIsTrainerVerified(false);
+        setTrainerIdInput('');
+        setVerifiedTrainerName('');
+        setMessage({text: '', type: 'info'});
+    };
+
+    const handleVerifyTrainerId = async () => {
+        if (!trainerIdInput) {
+            setMessage({ text: '請輸入講師限定編號。', type: 'error' });
+            return;
+        }
+        setIsVerifying(true);
+        setMessage({ text: '驗證中...', type: 'info' });
+
+        try {
+            const trainersCollectionRef = collection(db, `artifacts/${appId}/public/data/trainers`);
+            const q = query(trainersCollectionRef, where("id", "==", trainerIdInput));
+            const querySnapshot = await getDocs(q);
+
+            if (querySnapshot.empty) {
+                setMessage({ text: '無效的講師編號，請重新輸入。', type: 'error' });
+                setIsTrainerVerified(false);
+            } else {
+                const trainerData = querySnapshot.docs[0].data();
+                setVerifiedTrainerName(trainerData.name);
+                setMessage({ text: `驗證成功！歡迎您，${trainerData.name} 講師。`, type: 'success' });
+                setIsTrainerVerified(true);
+            }
+        } catch (error) {
+            console.error("Error verifying trainer ID: ", error);
+            setMessage({ text: '驗證時發生錯誤，請稍後再試。', type: 'error' });
+        } finally {
+            setIsVerifying(false);
+        }
+    };
+
+    const handleFileChange = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = (event) => {
+            const img = new Image();
+            img.onload = () => {
+                setUserImage(img);
+                const canvas = canvasRef.current;
+                const canvasAspectRatio = canvas.width / canvas.height;
+                const imageAspectRatio = img.width / img.height;
+                let scale, x, y;
+                if (imageAspectRatio > canvasAspectRatio) {
+                    scale = canvas.height / img.height;
+                    x = (canvas.width - img.width * scale) / 2;
+                    y = 0;
+                } else {
+                    scale = canvas.width / img.width;
+                    x = 0;
+                    y = (canvas.height - img.height * scale) / 2;
+                }
+                setImageTransform({ x, y, scale });
+                setRotation(0);
+            };
+            img.src = event.target.result;
+        };
+        reader.readAsDataURL(file);
+    };
+
+    const handleDownload = () => {
+        if (!userImage) {
+            setMessage({text: '請先上傳照片。', type: 'error'});
+            return;
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = 400;
+        canvas.height = 400;
+        const ctx = canvas.getContext('2d');
+        
+        const padding = 28;
+        const radius = canvas.width / 2 - padding;
+
+        if (userImage) {
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(canvas.width / 2, canvas.height / 2, radius, 0, Math.PI * 2);
+            ctx.clip();
+            
+            ctx.save();
+            const { x, y, scale } = imageTransform;
+            const scaledWidth = userImage.width * scale;
+            const scaledHeight = userImage.height * scale;
+
+            ctx.translate(x + scaledWidth / 2, y + scaledHeight / 2);
+            ctx.rotate(rotation * Math.PI / 180);
+            ctx.drawImage(userImage, -scaledWidth / 2, -scaledHeight / 2, scaledWidth, scaledHeight);
+            
+            ctx.restore();
+            ctx.restore();
+        }
+        if (frameImage.complete && frameImage.naturalHeight !== 0) {
+            ctx.drawImage(frameImage, 0, 0, canvas.width, canvas.height);
+        }
+
+        const link = document.createElement('a');
+        link.download = `gemini_${currentRole}_profile.png`;
+        link.href = canvas.toDataURL('image/png');
+        link.click();
+    };
+    
+    const isUploadDisabled = currentRole === 'trainer' && !isTrainerVerified;
+
+    // --- Event Handlers for Canvas Interaction ---
+    const handleMouseDown = (e) => {
+        if (!userImage) return;
+        e.preventDefault();
+        setIsDragging(true);
+        setLastMousePos({ x: e.nativeEvent.offsetX, y: e.nativeEvent.offsetY });
+    };
+
+    const handleMouseMove = (e) => {
+        if (!isDragging || !userImage) return;
+        e.preventDefault();
+        const offsetX = e.nativeEvent.offsetX;
+        const offsetY = e.nativeEvent.offsetY;
+        const dx = offsetX - lastMousePos.x;
+        const dy = offsetY - lastMousePos.y;
+
+        setLastMousePos({ x: offsetX, y: offsetY });
+        setImageTransform(prev => ({ ...prev, x: prev.x + dx, y: prev.y + dy }));
+    };
+
+    const handleMouseUpOrLeave = () => {
+        setIsDragging(false);
+    };
+
+    const handleWheel = (e) => {
+        if (!userImage) return;
+        e.preventDefault();
+        const scaleAmount = 1.1;
+        const mouseX = e.nativeEvent.offsetX;
+        const mouseY = e.nativeEvent.offsetY;
+
+        setImageTransform(prev => {
+            let newScale = e.deltaY < 0 ? prev.scale * scaleAmount : prev.scale / scaleAmount;
+            newScale = Math.max(0.1, Math.min(newScale, 5));
+            const newX = mouseX - (mouseX - prev.x) * (newScale / prev.scale);
+            const newY = mouseY - (mouseY - prev.y) * (newScale / prev.scale);
+            return { scale: newScale, x: newX, y: newY };
+        });
+    };
+
+    const getPinchDistance = (touches) => {
+        return Math.sqrt(Math.pow(touches[1].clientX - touches[0].clientX, 2) + Math.pow(touches[1].clientY - touches[0].clientY, 2));
+    };
+
+    const handleTouchStart = (e) => {
+        if (!userImage) return;
+        e.preventDefault();
+        if (e.touches.length === 1) {
+            setIsDragging(true);
+            const rect = e.target.getBoundingClientRect();
+            setLastMousePos({ x: e.touches[0].clientX - rect.left, y: e.touches[0].clientY - rect.top });
+        } else if (e.touches.length === 2) {
+            setInitialPinchDistance(getPinchDistance(e.touches));
+            setIsDragging(false);
+        }
+    };
+
+    const handleTouchMove = (e) => {
+        if (!userImage) return;
+        e.preventDefault();
+        const rect = e.target.getBoundingClientRect();
+
+        if (isDragging && e.touches.length === 1) {
+            const currentX = e.touches[0].clientX - rect.left;
+            const currentY = e.touches[0].clientY - rect.top;
+            const dx = currentX - lastMousePos.x;
+            const dy = currentY - lastMousePos.y;
+            setLastMousePos({ x: currentX, y: currentY });
+            setImageTransform(prev => ({ ...prev, x: prev.x + dx, y: prev.y + dy }));
+        } else if (e.touches.length === 2 && initialPinchDistance !== null) {
+            const currentPinchDistance = getPinchDistance(e.touches);
+            const scaleFactor = currentPinchDistance / initialPinchDistance;
+            const centerX = ((e.touches[0].clientX + e.touches[1].clientX) / 2) - rect.left;
+            const centerY = ((e.touches[0].clientY + e.touches[1].clientY) / 2) - rect.top;
+
+            setImageTransform(prev => {
+                let newScale = prev.scale * scaleFactor;
+                newScale = Math.max(0.1, Math.min(newScale, 5));
+                const newX = centerX - (centerX - prev.x) * (newScale / prev.scale);
+                const newY = centerY - (centerY - prev.y) * (newScale / prev.scale);
+                return { scale: newScale, x: newX, y: newY };
+            });
+            setInitialPinchDistance(currentPinchDistance);
+        }
+    };
+
+    const handleTouchEnd = () => {
+        setIsDragging(false);
+        setInitialPinchDistance(null);
+    };
+
+    return (
+        <div className="bg-white dark:bg-gray-800 p-8 rounded-xl shadow-lg w-full">
+            <div className="w-full max-w-lg mx-auto flex flex-col">
+                <h1 className="text-3xl font-bold text-center text-gray-800 dark:text-gray-100 mb-2">Gemini AI 頭貼產生器</h1>
+                <h2 className="text-2xl font-semibold text-center text-gray-600 dark:text-gray-300 mb-6">選擇您的身份，套用專屬外框</h2>
+                
+                <div className="mb-6">
+                    <label className="block text-md font-medium text-gray-700 dark:text-gray-300 mb-2">1. 選擇您的身份：</label>
+                    <div className="grid grid-cols-2 gap-4">
+                        <button onClick={() => handleRoleChange('educator')} className={`role-btn w-full p-3 border rounded-xl shadow-sm transition-colors duration-200 ${currentRole === 'educator' ? 'bg-blue-600 text-white' : 'bg-gray-200 dark:bg-gray-700'}`}>Gemini AI 教育家</button>
+                        <button onClick={() => handleRoleChange('trainer')} className={`role-btn w-full p-3 border rounded-xl shadow-sm transition-colors duration-200 ${currentRole === 'trainer' ? 'bg-blue-600 text-white' : 'bg-gray-200 dark:bg-gray-700'}`}>Gemini AI 講師</button>
+                    </div>
+                </div>
+
+                {currentRole === 'trainer' && (
+                    <div className="mb-6 p-4 bg-blue-50 dark:bg-gray-900 rounded-lg">
+                        <label className="block text-md font-medium text-gray-700 dark:text-gray-300 mb-2">講師身份驗證</label>
+                        <div className="flex gap-2">
+                            <input 
+                                type="text" 
+                                value={trainerIdInput}
+                                onChange={(e) => setTrainerIdInput(e.target.value)}
+                                placeholder="請輸入講師限定編號"
+                                className="flex-grow p-2 border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 rounded-lg"
+                                disabled={isTrainerVerified}
+                            />
+                            <button 
+                                onClick={handleVerifyTrainerId} 
+                                disabled={isVerifying || isTrainerVerified}
+                                className="bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 disabled:bg-gray-400 flex items-center justify-center w-24"
+                            >
+                                {isVerifying ? <Spinner /> : (isTrainerVerified ? '已驗證' : '驗證')}
+                            </button>
+                        </div>
+                    </div>
+                )}
+
+                <div className="mb-6">
+                    <label className="block text-md font-medium text-gray-700 dark:text-gray-300 mb-2">2. 上傳您的照片：</label>
+                    <button 
+                        onClick={() => uploadButtonRef.current.click()}
+                        disabled={isUploadDisabled}
+                        className="w-full text-center cursor-pointer bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-xl transition duration-300 ease-in-out shadow-md disabled:bg-gray-400 disabled:cursor-not-allowed"
+                    >
+                        點我上傳
+                    </button>
+                    <input type="file" ref={uploadButtonRef} accept="image/*" onChange={handleFileChange} className="hidden" />
+                </div>
+                
+                <div className="mb-6">
+                    <label className="block text-md font-medium text-gray-700 dark:text-gray-300 mb-2">3. 調整圖片 (移動、縮放、旋轉)：</label>
+                    <div className="flex justify-center mb-4">
+                        <canvas 
+                            ref={canvasRef} 
+                            width="400" 
+                            height="400" 
+                            className="border-4 border-gray-300 dark:border-gray-600 rounded-full shadow-inner bg-gray-100 dark:bg-gray-700 cursor-grab active:cursor-grabbing"
+                            onMouseDown={handleMouseDown}
+                            onMouseMove={handleMouseMove}
+                            onMouseUp={handleMouseUpOrLeave}
+                            onMouseLeave={handleMouseUpOrLeave}
+                            onWheel={handleWheel}
+                            onTouchStart={handleTouchStart}
+                            onTouchMove={handleTouchMove}
+                            onTouchEnd={handleTouchEnd}
+                        />
+                    </div>
+                    <div className="px-2 space-y-3">
+                        <div>
+                            <label htmlFor="rotation-slider" className="block text-sm font-medium text-gray-600 dark:text-gray-400">旋轉角度: {rotation}°</label>
+                            <input
+                                id="rotation-slider"
+                                type="range"
+                                min="-180"
+                                max="180"
+                                value={rotation}
+                                onChange={(e) => setRotation(Number(e.target.value))}
+                                className="w-full h-2 bg-gray-200 dark:bg-gray-600 rounded-lg appearance-none cursor-pointer"
+                            />
+                        </div>
+                    </div>
+                </div>
+
+                <button onClick={handleDownload} className="bg-green-600 hover:bg-green-700 text-white font-semibold py-3 px-6 rounded-xl transition duration-300 ease-in-out shadow-md">
+                    下載頭貼
+                </button>
+                
+                {message.text && <p className={`mt-4 text-center text-sm ${message.type === 'error' ? 'text-red-600' : 'text-green-600'}`}>{message.text}</p>}
+            </div>
+        </div>
+    );
+}
+
+
+export default function App() {
+    const [view, setView] = useState('generator');
+    const [isAuthReady, setIsAuthReady] = useState(false);
+    const [user, setUser] = useState(null);
+    const [adminLoginError, setAdminLoginError] = useState('');
+    const [isLoggingIn, setIsLoggingIn] = useState(false);
+    
+    useEffect(() => {
+        // **FIX**: Changed the initial authentication logic.
+        const performInitialAuth = async () => {
+            try {
+                // When using a personal Firebase project, we should not use the
+                // environment's custom token. Instead, we sign in anonymously
+                // to establish a session for public users.
+                await signInAnonymously(auth);
+            } catch (error) {
+                console.error("Initial anonymous authentication failed:", error);
+            }
+        };
+        
+        const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+            setUser(currentUser);
+            setIsAuthReady(true);
+            console.log("Auth state changed. Current user:", currentUser ? currentUser.uid : 'None');
+        });
+
+        performInitialAuth();
+
+        return () => unsubscribe();
+    }, []);
+
+    const handleAdminLogin = async (email, password) => {
+        setIsLoggingIn(true);
+        setAdminLoginError('');
+        try {
+            await setPersistence(auth, browserSessionPersistence);
+            await signInWithEmailAndPassword(auth, email, password);
+        } catch (error) {
+            console.error("完整的 Firebase 登入錯誤物件:", error);
+            let userMessage = '';
+            switch (error.code) {
+                case 'auth/operation-not-allowed':
+                    userMessage = '此登入方式未啟用。請在 Firebase 控制台啟用「電子郵件/密碼」登入。';
+                    break;
+                case 'auth/user-not-found':
+                case 'auth/wrong-password':
+                case 'auth/invalid-credential':
+                    userMessage = '您輸入的電子郵件或密碼不正確。';
+                    break;
+                case 'auth/invalid-email':
+                    userMessage = '您輸入的電子郵件格式不正確。';
+                    break;
+                case 'auth/too-many-requests':
+                    userMessage = '偵測到異常活動，帳戶已被暫時鎖定。請稍後再試。';
+                    break;
+                case 'auth/network-request-failed':
+                     userMessage = '網路連線失敗，請檢查您的網路設定。';
+                     break;
+                default:
+                    userMessage = `發生未知的錯誤。`;
+                    break;
+            }
+            const detailedError = `${userMessage} (技術細節: ${error.code})`;
+            setAdminLoginError(detailedError);
+        } finally {
+            setIsLoggingIn(false);
+        }
+    };
+    
+    const handleAdminLogout = async () => {
+        try {
+            await signOut(auth);
+            await signInAnonymously(auth);
+        } catch (error) {
+            console.error("Logout failed:", error);
+        }
+    };
+
+    const renderAdminView = () => {
+        if (user && !user.isAnonymous) {
+            return <AdminPanel onLogout={handleAdminLogout} user={user} />;
+        } else {
+            return <AdminLogin onLogin={handleAdminLogin} error={adminLoginError} isLoading={isLoggingIn} projectId={firebaseConfig.projectId} />;
+        }
+    };
+
+    if (!isAuthReady) {
+        return (
+            <div className="flex items-center justify-center min-h-screen bg-gray-100 dark:bg-gray-900">
+                <div className="text-center flex flex-col items-center space-y-4">
+                    <Spinner forButton={false} />
+                    <p className="text-xl text-gray-700 dark:text-gray-200">正在與 Firebase 建立安全連線...</p>
+                </div>
+            </div>
+        );
+    }
+
+    return (
+        <div className="bg-gray-100 dark:bg-gray-900 min-h-screen font-sans p-4 sm:p-8">
+            <div className="max-w-6xl mx-auto">
+                <header className="mb-8 flex justify-between items-center flex-wrap">
+                    <h1 className="text-2xl font-bold text-gray-700 dark:text-gray-200">Gemini 頭貼產生器暨講師管理系統</h1>
+                    <nav className="bg-white dark:bg-gray-800 p-1 rounded-lg shadow mt-4 sm:mt-0">
+                        <button onClick={() => setView('generator')} className={`px-4 py-2 rounded-md transition-colors ${view === 'generator' ? 'bg-blue-500 text-white' : 'text-gray-600 dark:text-gray-300'}`}>
+                            頭貼產生器
+                        </button>
+                        <button onClick={() => setView('admin')} className={`px-4 py-2 rounded-md transition-colors ${view === 'admin' ? 'bg-blue-500 text-white' : 'text-gray-600 dark:text-gray-300'}`}>
+                            講師管理
+                        </button>
+                    </nav>
+                </header>
+                <main>
+                    {view === 'generator' ? <ProfileGenerator /> : renderAdminView()}
+                </main>
+            </div>
+        </div>
+    );
+}
